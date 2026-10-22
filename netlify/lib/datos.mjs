@@ -7,10 +7,14 @@ export const LIGAS = {
   SA:  { nombre: "Serie A",          pais: "Italia",     odds: "soccer_italy_serie_a" },
   BL1: { nombre: "Bundesliga",       pais: "Alemania",   odds: "soccer_germany_bundesliga" },
   FL1: { nombre: "Ligue 1",          pais: "Francia",    odds: "soccer_france_ligue_one" },
-  CL:  { nombre: "Champions League", pais: "Europa",     odds: "soccer_uefa_champs_league" },
+  CL:  { nombre: "Champions League", pais: "Europa",     odds: "soccer_uefa_champs_league", dias: [0, 1, 2, 3] },
+  // Copas que solo vienen de the-odds-api (no están en el plan gratis de football-data.org).
+  // Se juegan los jueves: sus cuotas se descargan de lunes a jueves para cuidar los créditos.
+  EL:  { nombre: "Europa League",    pais: "Europa",     odds: "soccer_uefa_europa_league", fuente: "odds", dias: [1, 2, 3, 4] },
+  ECL: { nombre: "Conference League", pais: "Europa",    odds: "soccer_uefa_europa_conference_league", fuente: "odds", dias: [1, 2, 3, 4] },
   BSA: { nombre: "Brasileirão",      pais: "Brasil",     odds: "soccer_brazil_campeonato" },
   // Colombia no está en football-data.org: sus partidos vienen de API-Football (id 239)
-  CO:  { nombre: "Liga BetPlay",     pais: "Colombia",   odds: "soccer_colombia_primera_a", fuente: "af", afId: 239 },
+  CO:  { nombre: "Liga BetPlay",     pais: "Colombia",   odds: null, fuente: "af", afId: 239 },
 };
 
 const HORA = 3600e3;
@@ -71,7 +75,7 @@ export function compactarCuotas(eventos) {
       if (v.o.length && v.u.length) totales[k] = [r2(media(v.o)), r2(media(v.u))];
     }
     return {
-      h: ev.home_team, a: ev.away_team, t: ev.commence_time,
+      id: ev.id, h: ev.home_team, a: ev.away_team, t: ev.commence_time,
       o1: r2(media(h2h.h)), oX: r2(media(h2h.d)), o2: r2(media(h2h.a)),
       tot: totales, casas: (ev.bookmakers || []).length,
     };
@@ -143,6 +147,25 @@ async function bajarCuotas(deporte, clave) {
   return compactarCuotas(await r.json());
 }
 
+// Para las copas sin datos de resultados: los partidos salen de la lista de cuotas
+function partidosDesdeCuotas(lista, ahora, claveCuotas) {
+  const equipos = {};
+  const proximos = [];
+  for (const c of lista) {
+    const t = Date.parse(c.t);
+    if (!(t > ahora - 2 * HORA && t < ahora + DIAS_PROXIMOS * 24 * HORA)) continue;
+    if (!c.o1 || !c.oX || !c.o2) continue;
+    equipos[c.h] = { n: c.h, f: c.h, c: "" };
+    equipos[c.a] = { n: c.a, f: c.a, c: "" };
+    proximos.push({ id: c.id, f: new Date(t).toISOString(), h: c.h, a: c.a, j: null });
+  }
+  proximos.sort((x, y) => x.f.localeCompare(y.f));
+  return {
+    soloMercado: true, equipos, jugados: [], proximos,
+    error: claveCuotas ? null : "Necesita la clave ODDS_API_KEY",
+  };
+}
+
 export async function actualizarTodo(anterior = null) {
   const claveFutbol = process.env.FOOTBALL_DATA_KEY;
   const claveCuotas = process.env.ODDS_API_KEY;
@@ -156,10 +179,16 @@ export async function actualizarTodo(anterior = null) {
   const codigos = Object.keys(LIGAS);
   const partidos = await Promise.allSettled(codigos.map((c) => LIGAS[c].fuente === "af"
     ? bajarPartidosAF(LIGAS[c], process.env.API_FOOTBALL_KEY)
-    : bajarPartidos(c, claveFutbol)));
-  const cuotas = tocaCuotas
-    ? await Promise.allSettled(codigos.map((c) => bajarCuotas(LIGAS[c].odds, claveCuotas)))
-    : null;
+    : LIGAS[c].fuente === "odds"
+      ? Promise.resolve({ equipos: {}, jugados: [], proximos: [] })
+      : bajarPartidos(c, claveFutbol)));
+  const diaSemana = new Date(ahora).getUTCDay();
+  // Una liga nueva (sin cuotas guardadas) se descarga de inmediato, sin esperar las 20 horas
+  const pideCuotas = (c) => !!claveCuotas && LIGAS[c].odds &&
+    (tocaCuotas || !anterior?.ligas?.[c]) &&
+    (!LIGAS[c].dias || LIGAS[c].dias.includes(diaSemana));
+  const cuotas = await Promise.allSettled(codigos.map((c) =>
+    pideCuotas(c) ? bajarCuotas(LIGAS[c].odds, claveCuotas) : Promise.resolve(null)));
 
   const ligas = {};
   codigos.forEach((c, i) => {
@@ -173,10 +202,12 @@ export async function actualizarTodo(anterior = null) {
       return;
     }
     let lista = previa?.cuotas || [];
-    if (cuotas && cuotas[i].status === "fulfilled") lista = cuotas[i].value;
+    if (cuotas[i].status === "fulfilled" && cuotas[i].value) lista = cuotas[i].value;
+    let extra = {};
+    if (LIGAS[c].fuente === "odds") extra = partidosDesdeCuotas(lista, ahora, claveCuotas);
     ligas[c] = {
-      ...LIGAS[c], ...base, cuotas: lista,
-      error: p.status === "rejected" ? String(p.reason?.message || p.reason) : null,
+      ...LIGAS[c], ...base, ...extra, cuotas: lista,
+      error: p.status === "rejected" ? String(p.reason?.message || p.reason) : extra.error || null,
     };
   });
 
