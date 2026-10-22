@@ -11,6 +11,7 @@
     ligasOcultas: [], presupuesto: 0, nivel: "mediana", cantMediana: 4, cantGrande: 8,
     ventana: 3, soloValor: false, conStats: true, tema: "auto", ordenStats: "tiros",
     modoComb: "ia", claveIA: "", modeloIA: "claude-sonnet-5-5", buscarIA: true,
+    proveedorIA: "gemini", claveGemini: "", modeloGemini: "gemini-2.5-flash",
   }, leer("prefs", {}));
   let apuestas = leer("apuestas", []);
   const guardarPrefs = () => guardar("prefs", prefs);
@@ -82,6 +83,18 @@
         if (Date.parse(p.f) < ahora - 2 * 3600e3) continue;
         const eqH = liga.equipos[p.h] || { n: "Local" }, eqA = liga.equipos[p.a] || { n: "Visitante" };
         const nom = { h: eqH.n, a: eqA.n };
+        if (liga.soloMercado) {
+          // Copas sin historial: las probabilidades salen de las cuotas, sin el margen de las casas
+          const cuota = (liga.cuotas || []).find((c) => c.id === p.id);
+          if (!cuota?.o1) continue;
+          const an = Modelo.analizarMercado(p, cuota, nom);
+          out.push({
+            ...p, codigo, ligaNombre: liga.nombre, eqH, eqA, nom, an, fH: [], fA: [], cuota, soloMercado: true,
+            texto: `Probabilidades sacadas de las cuotas de ${cuota.casas} casas, quitando su margen. ` + Modelo.lectura(an, nom, [], []),
+            textoStats: "",
+          });
+          continue;
+        }
         const cuota = buscarCuota(p, liga, eqH, eqA);
         const an = Modelo.analizar(p, F, base, cuota, nom);
         Modelo.agregarStats(an, Modelo.esperadas(liga._S, p.h, p.a), nom);
@@ -159,7 +172,7 @@
 
   // ---------- Vista: partidos ----------
   function tarjeta(p) {
-    const an = p.an, abierto = estado.abiertos.has(p.id);
+    const an = p.an, abierto = estado.abiertos.has(String(p.id));
     const fav = Math.max(an.p1, an.pX, an.p2);
     const cls = (x) => (x === fav ? "pct fav" : "pct");
     const mercados = an.mercados.filter((m) => !m.grupo).sort((x, y) => y.p - x.p);
@@ -185,11 +198,11 @@
           <div class="dato"><b>${an.marcadores[0][0]}</b><span>Marcador más probable</span></div>
           <div class="dato"><b>${pct(an.btts)} %</b><span>Ambos marcan</span></div>
           <div class="dato"><b>${pct(an.o25)} %</b><span>Más de 2.5 goles</span></div>
-          <div class="dato"><b>${an.confianza}</b><span>Confianza de datos</span></div>
+          <div class="dato"><b>${an.confianza === "mercado" ? "cuotas" : an.confianza}</b><span>${an.confianza === "mercado" ? "Fuente" : "Confianza de datos"}</span></div>
           <div class="dato"><b>${p.cuota ? p.cuota.casas : "—"}</b><span>Casas con cuota</span></div>
         </div>
-        <div class="fila-forma"><span>${esc(p.nom.h)}</span>${formaHTML(p.fH)}</div>
-        <div class="fila-forma"><span>${esc(p.nom.a)}</span>${formaHTML(p.fA)}</div>
+        ${p.soloMercado ? "" : `<div class="fila-forma"><span>${esc(p.nom.h)}</span>${formaHTML(p.fH)}</div>
+        <div class="fila-forma"><span>${esc(p.nom.a)}</span>${formaHTML(p.fA)}</div>`}
         <div class="desliza"><table>
           <thead><tr><th>Mercado</th><th class="n">Prob.</th><th class="n">Cuota justa</th><th class="n">Cuota casas</th><th class="n">Valor</th></tr></thead>
           <tbody>${mercados.map((m) => `
@@ -206,6 +219,7 @@
   }
   function bloqueStats(p) {
     const e = p.an.stats;
+    if (p.soloMercado) return "";
     if (!e) {
       return estado.datos?.conEstadisticas || estado.demo
         ? `<p class="nota">Aún no hay estadísticas de remates y córners para estos equipos. Se van completando cada hora.</p>`
@@ -325,11 +339,16 @@
     return { nivel, elegidas, prob, justa: 1 / prob, cuota, ev: cuota ? prob * cuota - 1 : null, comentario: bloque.comentario };
   }
 
+  const iaActual = () => prefs.proveedorIA === "claude"
+    ? { proveedor: "claude", nombre: "Claude", clave: prefs.claveIA, modelo: prefs.modeloIA }
+    : { proveedor: "gemini", nombre: "Gemini", clave: prefs.claveGemini, modelo: prefs.modeloGemini };
+
   function vistaIA() {
-    if (!prefs.claveIA) {
+    const ia = iaActual();
+    if (!ia.clave) {
       return `<div class="bloque"><h2>Combinadas armadas por IA</h2>
-        <p>Claude revisa todo el mercado del día (probabilidades, cuotas, córners, remates, paradas y tarjetas), puede buscar bajas y noticias en internet, y te arma una combinada simple de 4 o 5 selecciones y una arriesgada de 8 a 10, explicando cada elección.</p>
-        <p>Para usarla necesitas una clave de la API de Claude. Mira cómo sacarla en la guía de instalación.</p>
+        <p>La IA revisa todo el mercado del día (probabilidades, cuotas, córners, remates, paradas y tarjetas), puede buscar bajas y noticias en internet, y te arma una combinada simple de 4 o 5 selecciones y una arriesgada de 8 a 10, explicando cada elección.</p>
+        <p>Puedes usarla gratis con una clave de Gemini de Google: entra a <b>aistudio.google.com</b>, inicia sesión con tu cuenta de Google y toca “Get API key”.</p>
         <button class="btn" data-ir-ajustes>Agregar clave en Ajustes</button></div>`;
     }
     const n = partidosVentana().length;
@@ -341,12 +360,12 @@
       </div>
       <button class="btn ancho" data-armar-ia ${estado.iaCargando || n < 4 ? "disabled" : ""}>
         ${estado.iaCargando ? "Armando…" : guardado ? "Volver a armar con IA" : "Armar con IA"}</button>
-      <p class="estado-ia" role="status">${estado.iaCargando ? esc(estado.iaEstado) : n < 4 ? "Hay menos de 4 partidos en los días elegidos." : `Claude revisará ${Math.min(n, 45)} partidos.`}</p>
+      <p class="estado-ia" role="status">${estado.iaCargando ? esc(estado.iaEstado) : n < 4 ? "Hay menos de 4 partidos en los días elegidos." : `${ia.nombre} revisará ${Math.min(n, 45)} partidos.`}</p>
       ${estado.iaError ? `<p class="nota alerta">${esc(estado.iaError)}</p>` : ""}`;
     if (guardado && !estado.iaCargando) {
       const simple = rehidratar(guardado.simple, "mediana");
       const arriesgada = rehidratar(guardado.arriesgada, "grande");
-      html += `<p class="nota">Armadas ${hace(new Date(guardado.t).toISOString())}${guardado.buscar ? ", con búsqueda de noticias" : ""}. Las probabilidades se recalculan con los datos más recientes.</p>`;
+      html += `<p class="nota">Armadas ${hace(new Date(guardado.t).toISOString())}${guardado.ia ? ` por ${esc(guardado.ia)}` : ""}${guardado.buscar ? ", con búsqueda de noticias" : ""}. Las probabilidades se recalculan con los datos más recientes.</p>`;
       if (simple) { estado.combos.simple = simple; html += boletoHTML(simple, "Combinada simple", "simple"); }
       if (arriesgada) { estado.combos.arriesgada = arriesgada; html += `<div style="height:14px"></div>` + boletoHTML(arriesgada, "Combinada arriesgada", "arriesgada"); }
       if (!simple && !arriesgada) html += `<p class="nota">Los partidos de esas combinadas ya se jugaron. Arma unas nuevas.</p>`;
@@ -361,15 +380,17 @@
     pintar();
     try {
       const lista = partidosVentana();
+      const ia = iaActual();
       const { crudo, indice } = await IA.armar({
-        partidos: lista, clave: prefs.claveIA, modelo: prefs.modeloIA, buscar: prefs.buscarIA,
+        proveedor: ia.proveedor, partidos: lista, clave: ia.clave, modelo: ia.modelo, buscar: prefs.buscarIA,
         alAvanzar: (t) => { estado.iaEstado = t; const e = $(".estado-ia"); if (e) e.textContent = t; },
       });
       const conv = (b) => {
         const c = IA.aCombinada(b, indice);
         return c ? { comentario: c.comentario, sel: c.elegidas.map((e) => ({ pid: e.partido.id, k: e.sel.k, motivo: e.motivo })) } : null;
       };
-      const res = { t: Date.now(), buscar: prefs.buscarIA, simple: conv(crudo.simple), arriesgada: conv(crudo.arriesgada), avisos: crudo.avisos || [] };
+      const sinBusqueda = (crudo.avisos || []).some((a) => String(a).startsWith("No se pudo usar la búsqueda"));
+      const res = { t: Date.now(), buscar: prefs.buscarIA && !sinBusqueda, ia: iaActual().nombre, simple: conv(crudo.simple), arriesgada: conv(crudo.arriesgada), avisos: crudo.avisos || [] };
       if (!res.simple && !res.arriesgada) throw new Error("La IA no eligió mercados válidos. Intenta de nuevo.");
       guardar("ia", res);
     } catch (e) {
@@ -421,6 +442,9 @@
     const control = `<div class="control" role="group" aria-label="Tipo de tabla">
       <button data-subtabla="posiciones" aria-pressed="${estado.subTabla === "posiciones"}">Posiciones</button>
       <button data-subtabla="estadisticas" aria-pressed="${estado.subTabla === "estadisticas"}">Estadísticas</button></div>`;
+    if (liga?.soloMercado) {
+      return `<div class="vacio-msj"><h2>Sin tabla para esta copa</h2><p>De ${esc(liga.nombre)} solo llegan las cuotas de los próximos partidos (el plan gratis de football-data.org no la incluye), así que no hay tabla ni forma de equipos. Sus partidos sí aparecen en Partidos y Combinadas.</p></div>`;
+    }
     if (estado.subTabla === "estadisticas") return control + tablaStats(liga, hayStats);
     if (!liga?._tabla?.length) return control + `<div class="vacio-msj"><h2>Sin tabla todavía</h2><p>Esta liga aún no tiene partidos jugados en la temporada.</p></div>`;
     return control + `<div class="bloque"><h2>${esc(liga.nombre)}${liga.torneo ? `, ${esc(liga.torneo)}` : ""}</h2><div class="desliza"><table>
@@ -509,13 +533,25 @@
       </section>
       <section class="bloque">
         <h2>Inteligencia artificial</h2>
-        <p style="margin-top:0">Clave de la API de Claude para armar combinadas con IA. Se guarda solo en este celular.</p>
-        <div class="campo">
-          <input type="password" id="clave-ia" value="${esc(prefs.claveIA)}" placeholder="sk-ant-…" autocomplete="off" aria-label="Clave de la API de Claude" style="width:100%">
-          <label style="width:100%">Modelo <input id="modelo-ia" value="${esc(prefs.modeloIA)}" aria-label="Modelo de Claude" style="width:100%"></label>
-          <button class="btn" data-guardar-ia>Guardar</button>
+        <div class="control" role="group" aria-label="Proveedor de IA">
+          <button data-proveedor="gemini" aria-pressed="${prefs.proveedorIA !== "claude"}">Gemini (gratis)</button>
+          <button data-proveedor="claude" aria-pressed="${prefs.proveedorIA === "claude"}">Claude (de pago)</button>
         </div>
-        <p class="nota">Cada combinada armada con IA consume un poco de saldo de tu cuenta de Anthropic; con búsqueda de noticias consume más.</p>
+        ${prefs.proveedorIA === "claude" ? `
+          <p style="margin-top:0">Clave de la API de Claude (console.anthropic.com). Se guarda solo en este celular.</p>
+          <div class="campo">
+            <input type="password" id="clave-ia" value="${esc(prefs.claveIA)}" placeholder="sk-ant-…" autocomplete="off" aria-label="Clave de la API de Claude" style="width:100%">
+            <label style="width:100%">Modelo <input id="modelo-ia" value="${esc(prefs.modeloIA)}" aria-label="Modelo de Claude" style="width:100%"></label>
+            <button class="btn" data-guardar-ia>Guardar</button>
+          </div>
+          <p class="nota">Cada combinada armada con Claude consume un poco de saldo de tu cuenta de Anthropic; con búsqueda de noticias consume más.</p>` : `
+          <p style="margin-top:0">Clave gratis de Gemini: entra a <b>aistudio.google.com</b> con tu cuenta de Google y toca “Get API key”. Se guarda solo en este celular.</p>
+          <div class="campo">
+            <input type="password" id="clave-gemini" value="${esc(prefs.claveGemini)}" placeholder="AIza…" autocomplete="off" aria-label="Clave de Gemini" style="width:100%">
+            <label style="width:100%">Modelo <input id="modelo-gemini" value="${esc(prefs.modeloGemini)}" aria-label="Modelo de Gemini" style="width:100%"></label>
+            <button class="btn" data-guardar-ia>Guardar</button>
+          </div>
+          <p class="nota">El nivel gratis tiene un límite de uso por minuto y por día, de sobra para algunas combinadas diarias. Si un día se acaba, la app te avisa.</p>`}
       </section>
       <section class="bloque">
         <h2>Ligas</h2>
@@ -573,7 +609,7 @@
     const t = e.target;
     const abrir = t.closest("[data-abrir]");
     if (abrir) {
-      const id = Number(abrir.dataset.abrir);
+      const id = abrir.dataset.abrir;
       estado.abiertos.has(id) ? estado.abiertos.delete(id) : estado.abiertos.add(id);
       const det = abrir.nextElementSibling;
       det.hidden = !estado.abiertos.has(id);
@@ -585,9 +621,17 @@
     const modo = t.closest("[data-modo]");
     if (modo) { prefs.modoComb = modo.dataset.modo; guardarPrefs(); pintar(); return; }
     if (t.closest("[data-guardar-ia]")) {
-      prefs.claveIA = $("#clave-ia").value.trim(); prefs.modeloIA = $("#modelo-ia").value.trim() || "claude-sonnet-5-5";
-      guardarPrefs(); pintar(); return;
+      if (prefs.proveedorIA === "claude") {
+        prefs.claveIA = $("#clave-ia").value.trim(); prefs.modeloIA = $("#modelo-ia").value.trim() || "claude-sonnet-5-5";
+      } else {
+        prefs.claveGemini = $("#clave-gemini").value.trim(); prefs.modeloGemini = $("#modelo-gemini").value.trim() || "gemini-2.5-flash";
+      }
+      guardarPrefs(); pintar();
+      const b = $("[data-guardar-ia]"); if (b) b.textContent = "Guardado ✓";
+      return;
     }
+    const prov = t.closest("[data-proveedor]");
+    if (prov) { prefs.proveedorIA = prov.dataset.proveedor; guardarPrefs(); pintar(); return; }
     const sub = t.closest("[data-subtabla]");
     if (sub) { estado.subTabla = sub.dataset.subtabla; pintar(); return; }
     const nivel = t.closest("[data-nivel]");
@@ -732,7 +776,15 @@
     return {
       actualizado: new Date().toISOString(), conEstadisticas: true,
       estadisticas: { ligas: { DEMO: { filas, pendientes: 0, error: null } } },
-      ligas: { DEMO: { nombre: "Liga de prueba", equipos, jugados, proximos, cuotas } },
+      ligas: {
+        DEMO: { nombre: "Liga de prueba", equipos, jugados, proximos, cuotas },
+        COPA: {
+          nombre: "Copa de prueba", soloMercado: true, jugados: [],
+          equipos: { "Dragones": { n: "Dragones", f: "Dragones", c: "" }, "Gaviotas": { n: "Gaviotas", f: "Gaviotas", c: "" } },
+          proximos: [{ id: "copa-1", f: new Date(inicioDia(Date.now()) + DIA + 19 * 3600e3).toISOString(), h: "Dragones", a: "Gaviotas", j: null }],
+          cuotas: [{ id: "copa-1", h: "Dragones", a: "Gaviotas", t: "", o1: 2.05, oX: 3.4, o2: 3.6, tot: { "2.5": [1.9, 1.9] }, casas: 20 }],
+        },
+      },
     };
   }
 

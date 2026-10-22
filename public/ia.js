@@ -1,5 +1,6 @@
-// Arma combinadas con Claude (API de Anthropic) a partir del mercado del día.
-// La clave se guarda solo en este celular y la llamada va directo a Anthropic.
+// Arma combinadas con IA a partir del mercado del día.
+// Proveedores: Gemini de Google (tiene nivel gratis) o Claude de Anthropic (de pago).
+// La clave se guarda solo en este celular y la llamada va directo al proveedor.
 const IA = (() => {
   const URL_API = "https://api.anthropic.com/v1/messages";
   const pct = (x) => Math.round(x * 100);
@@ -63,6 +64,60 @@ Responde ÚNICAMENTE con un objeto JSON, sin texto antes ni después y sin bloqu
     return JSON.parse(limpio.slice(a, b + 1));
   }
 
+  // ---------- Gemini (Google) ----------
+  async function llamarGemini(clave, modelo, texto, buscar) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelo)}:generateContent`;
+    const cuerpo = {
+      systemInstruction: { parts: [{ text: SISTEMA }] },
+      contents: [{ role: "user", parts: [{ text: texto }] }],
+      generationConfig: { temperature: 0.4, maxOutputTokens: 8192 },
+    };
+    // La búsqueda en Google no se puede combinar con la respuesta en JSON forzado
+    if (buscar) cuerpo.tools = [{ google_search: {} }];
+    else cuerpo.generationConfig.responseMimeType = "application/json";
+
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": clave },
+      body: JSON.stringify(cuerpo),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const msg = j?.error?.message || `HTTP ${r.status}`;
+      const e = new Error(msg);
+      e.status = r.status;
+      if (r.status === 429) e.message = "Llegaste al límite gratis de Gemini por ahora. Espera un minuto (o hasta mañana) e intenta de nuevo.";
+      else if (r.status === 404) e.message = `El modelo "${modelo}" no existe o ya no está disponible. Cámbialo en Ajustes.`;
+      else if (/api key/i.test(msg)) e.message = "La clave de Gemini no es válida. Revísala en Ajustes.";
+      else e.message = `Error de Gemini: ${msg}`;
+      throw e;
+    }
+    const cand = j.candidates?.[0];
+    const t = (cand?.content?.parts || []).filter((p) => p.text && !p.thought).map((p) => p.text).join("\n");
+    if (!t) {
+      throw new Error(cand?.finishReason === "MAX_TOKENS"
+        ? "La respuesta de Gemini quedó incompleta. Elige menos días e intenta de nuevo."
+        : "Gemini no devolvió respuesta. Intenta de nuevo.");
+    }
+    return t;
+  }
+
+  async function armarGemini({ clave, modelo, buscar, texto, alAvanzar }) {
+    alAvanzar(buscar ? "Gemini está revisando el mercado y buscando noticias…" : "Gemini está revisando el mercado…");
+    try {
+      return { texto: await llamarGemini(clave, modelo, texto, buscar), avisos: [] };
+    } catch (e) {
+      // Si falla la búsqueda en Google (no disponible en el plan), se reintenta sin ella
+      if (buscar && (e.status === 400 || e.status === 403 || e.status === 429)) {
+        alAvanzar("La búsqueda no está disponible; Gemini sigue sin noticias…");
+        const t = await llamarGemini(clave, modelo, texto, false);
+        return { texto: t, avisos: ["No se pudo usar la búsqueda de noticias en esta ocasión: la combinada se armó solo con los datos."] };
+      }
+      throw e;
+    }
+  }
+
+  // ---------- Claude (Anthropic) ----------
   async function llamar(clave, cuerpo) {
     const r = await fetch(URL_API, {
       method: "POST",
@@ -84,19 +139,14 @@ Responde ÚNICAMENTE con un objeto JSON, sin texto antes ni después y sin bloqu
     return j;
   }
 
-  async function armar({ partidos, clave, modelo, buscar, alAvanzar = () => {} }) {
-    if (!clave) throw new Error("Falta tu clave de Claude. Agrégala en Ajustes.");
-    const { texto, indice } = mercadoDelDia(partidos);
-    if (Object.keys(indice).length < 4) throw new Error("No hay suficientes mercados en los días elegidos.");
-
+  async function armarClaude({ clave, modelo, buscar, texto, alAvanzar }) {
     const cuerpo = {
       model: modelo,
       max_tokens: 4000,
       system: SISTEMA,
-      messages: [{ role: "user", content: `Mercado del día (${new Date().toLocaleDateString("es")}):\n\n${texto}` }],
+      messages: [{ role: "user", content: texto }],
     };
     if (buscar) cuerpo.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: 8 }];
-
     alAvanzar(buscar ? "Claude está revisando el mercado y buscando noticias…" : "Claude está revisando el mercado…");
     let resp = await llamar(clave, cuerpo);
     // Las búsquedas largas pueden pausar el turno: se continúa hasta 3 veces
@@ -105,8 +155,19 @@ Responde ÚNICAMENTE con un objeto JSON, sin texto antes ni después y sin bloqu
       cuerpo.messages = [...cuerpo.messages, { role: "assistant", content: resp.content }];
       resp = await llamar(clave, cuerpo);
     }
-    const textoResp = (resp.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
-    const j = extraerJSON(textoResp);
+    return { texto: (resp.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n"), avisos: [] };
+  }
+
+  async function armar({ proveedor = "gemini", partidos, clave, modelo, buscar, alAvanzar = () => {} }) {
+    const nombre = proveedor === "claude" ? "Claude" : "Gemini";
+    if (!clave) throw new Error(`Falta tu clave de ${nombre}. Agrégala en Ajustes.`);
+    const { texto, indice } = mercadoDelDia(partidos);
+    if (Object.keys(indice).length < 4) throw new Error("No hay suficientes mercados en los días elegidos.");
+    const pedido = `Mercado del día (${new Date().toLocaleDateString("es")}):\n\n${texto}`;
+    const args = { clave, modelo, buscar, texto: pedido, alAvanzar };
+    const res = proveedor === "claude" ? await armarClaude(args) : await armarGemini(args);
+    const j = extraerJSON(res.texto);
+    j.avisos = [...(Array.isArray(j.avisos) ? j.avisos : []), ...res.avisos];
     return { crudo: j, indice };
   }
 

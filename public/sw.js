@@ -1,5 +1,5 @@
 // Permite abrir la app sin conexión con los últimos datos descargados.
-const CACHE = "pizarra-v2";
+const CACHE = "pizarra-v4";
 const BASE = ["/", "/index.html", "/estilos.css", "/app.js", "/modelo.js", "/ia.js", "/manifest.webmanifest", "/icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {

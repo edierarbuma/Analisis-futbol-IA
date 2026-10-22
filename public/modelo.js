@@ -107,7 +107,7 @@ const Modelo = (() => {
       if (i > 0 && j > 0) r.btts += q;
       marcadores.push([`${i}-${j}`, q]);
     }
-    for (const k in r) r[k] = (1 - MEZCLA) * r[k] + MEZCLA * base[k];
+    if (base) for (const k in r) r[k] = (1 - MEZCLA) * r[k] + MEZCLA * base[k];
     const s = r.p1 + r.pX + r.p2;
     r.p1 /= s; r.pX /= s; r.p2 /= s;
     marcadores.sort((x, y) => y[1] - x[1]);
@@ -159,6 +159,55 @@ const Modelo = (() => {
     if (valor) partes.push(`Posible valor en “${valor.txt}” a cuota ${valor.o.toFixed(2)}.`);
     if (an.confianza === "baja") partes.push(`Hay pocos partidos de referencia: tómalo con cautela.`);
     return partes.join(" ");
+  }
+
+  // ---------- Partidos sin historial (copas): probabilidades sacadas de las cuotas ----------
+  // Busca los goles esperados de cada equipo que mejor reproducen el 1X2 y el más/menos de las casas.
+  function ajustarAMercado(c) {
+    const inv = [1 / c.o1, 1 / c.oX, 1 / c.o2];
+    const s = inv[0] + inv[1] + inv[2];
+    const q1 = inv[0] / s, q2 = inv[2] / s;
+    let linea = null, qOver = null;
+    const lineas = Object.keys(c.tot || {}).map(Number).filter((L) => Math.abs(L % 1 - 0.5) < 1e-9);
+    if (lineas.length) {
+      linea = lineas.includes(2.5) ? 2.5 : lineas.sort((a, b) => Math.abs(a - 2.5) - Math.abs(b - 2.5))[0];
+      const [o, u] = c.tot[String(linea)];
+      qOver = (1 / o) / (1 / o + 1 / u);
+    }
+    const vec = (l) => { const v = []; for (let k = 0; k <= 10; k++) v.push(pois(k, l)); return v; };
+    const error = (lh, la) => {
+      const ph = vec(lh), pa = vec(la);
+      let p1 = 0, p2 = 0, over = 0;
+      for (let i = 0; i <= 10; i++) for (let j = 0; j <= 10; j++) {
+        const q = ph[i] * pa[j];
+        if (i > j) p1 += q; else if (j > i) p2 += q;
+        if (linea != null && i + j > linea) over += q;
+      }
+      let err = (p1 - q1) ** 2 + (p2 - q2) ** 2;
+      if (linea != null) err += (over - qOver) ** 2;
+      return err;
+    };
+    // Búsqueda gruesa y luego fina alrededor del mejor punto
+    let mejor = null;
+    for (let lh = 0.2; lh <= 4.0; lh += 0.1) for (let la = 0.15; la <= 3.6; la += 0.1) {
+      const err = error(lh, la);
+      if (!mejor || err < mejor.err) mejor = { lh, la, err };
+    }
+    const c0 = { ...mejor };
+    for (let lh = c0.lh - 0.1; lh <= c0.lh + 0.1; lh += 0.01) for (let la = c0.la - 0.1; la <= c0.la + 0.1; la += 0.01) {
+      if (lh <= 0.05 || la <= 0.05) continue;
+      const err = error(lh, la);
+      if (err < mejor.err) mejor = { lh, la, err };
+    }
+    return mejor;
+  }
+
+  function analizarMercado(p, cuota, nombres) {
+    const { lh, la } = ajustarAMercado(cuota);
+    const F = { avgH: lh, avgA: la, att: {}, def: {}, n: {} };
+    const an = analizar(p, F, null, cuota, nombres);
+    an.confianza = "mercado";
+    return an;
   }
 
   // Niveles de combinada
@@ -335,7 +384,7 @@ const Modelo = (() => {
     return p.join(" ");
   }
 
-  return { fuerzas, baseLiga, forma, analizar, lectura, armarCombinada, NIVELES,
+  return { fuerzas, baseLiga, forma, analizar, analizarMercado, lectura, armarCombinada, NIVELES,
     ST, ST_NOMBRE, fuerzasStats, esperadas, agregarStats, lecturaStats };
 })();
 
