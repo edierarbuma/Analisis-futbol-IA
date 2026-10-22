@@ -1,0 +1,9 @@
+{
+  "name": "futbol-ia",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Análisis de partidos de fútbol y combinadas sugeridas",
+  "dependencies": {
+    "@netlify/blobs": "^8.1.0"
+  }
+}
